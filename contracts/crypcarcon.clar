@@ -29,6 +29,8 @@
 ;; data maps and vars
 (define-non-fungible-token crypto-card uint)
 
+(define-data-var total-sales uint u0)
+
 
 (define-map card-details uint
  {
@@ -86,6 +88,8 @@
    current-supply: uint
  }
 )
+
+
 (define-map series-info (string-ascii 32)
  {
    name: (string-ascii 64),
@@ -105,6 +109,7 @@
 (define-data-var total-cards-created uint u0)
 (define-data-var total-cards-traded uint u0)
 (define-data-var total-marketplace-volume uint u0)
+
 
 ;; private functions
 (define-private (is-owner (card-id uint))
@@ -171,7 +176,7 @@
        cards-created: u0,
        cards-sold: u0,
        cards-purchased: u0,
-    total-spent: u0,
+       total-spent: u0,
        total-earned: u0
      }
      (map-get? user-stats user)))
@@ -209,6 +214,8 @@
    (not (get locked status))
  )
 )
+
+
 ;; public functions
 (define-public (create-card (name (string-ascii 64))
                           (description (string-ascii 256))
@@ -257,6 +264,8 @@
    (ok new-id)
  )
 )
+
+
 (define-public (transfer-card (card-id uint) (recipient principal))
  (begin
    (asserts! (is-owner card-id) err-not-authorized)
@@ -298,6 +307,7 @@
        {locked: true}
      )
    )
+  
    (ok true)
  )
 )
@@ -325,3 +335,130 @@
 )
 
 
+(define-public (buy-card (card-id uint))
+  (let (
+    (listing (unwrap! (map-get? marketplace-listings card-id) err-not-found))
+    (seller (get seller listing))
+    (price (get price listing))
+    (fee (calculate-fee price))
+    (seller-amount (- price fee))
+  )
+    (asserts! (var-get marketplace-enabled) err-marketplace-disabled)
+    (asserts! (<= block-height (get expires-at listing)) err-not-found)
+   
+    ;; Transfer STX from buyer to seller and pay fee
+    (try! (stx-transfer? price tx-sender seller))
+   
+    ;; Transfer NFT ownership
+    (try! (nft-transfer? crypto-card card-id seller tx-sender))
+    (map-set card-ownership card-id tx-sender)
+   
+    ;; Update card status
+    (map-set card-status card-id
+      (merge
+        (default-to
+          {locked: true, cooldown-until: u0, last-action: block-height, upgrade-count: u0}
+          (map-get? card-status card-id)
+        )
+        {locked: false, last-action: block-height}
+      )
+    )
+   
+    ;; Remove listing
+    (map-delete marketplace-listings card-id)
+   
+    ;; Update stats
+    (increment-user-stat tx-sender "cards-owned")
+    (increment-user-stat tx-sender "cards-purchased")
+    (increment-user-stat seller "cards-sold")
+    ;; Fixed: Complete the variable set operation (example assuming total-sales counter)
+    (var-set total-sales (+ (var-get total-sales) u1))
+    
+    (ok true)  ;; Added return value
+  )
+)
+
+(define-public (add-card-experience (card-id uint) (amount uint))
+  (let (
+    (card (unwrap! (map-get? card-details card-id) err-not-found))
+    (current-exp (get experience card))
+    (new-exp (+ current-exp amount))
+  )
+    (asserts! (is-owner card-id) err-not-authorized)
+    (asserts! (check-card-not-locked card-id) err-card-locked)
+   
+    (map-set card-details card-id (merge card {experience: new-exp}))
+   
+    (ok new-exp)
+  )
+)
+
+(define-public (upgrade-card-level (card-id uint))
+  (let (
+    (card (unwrap! (map-get? card-details card-id) err-not-found))
+    (current-level (get level card))
+    (current-exp (get experience card))
+    (required-exp (* current-level u100))
+    (status (default-to
+              {locked: false, cooldown-until: u0, last-action: u0, upgrade-count: u0}
+              (map-get? card-status card-id)))
+  )
+    (asserts! (is-owner card-id) err-not-authorized)
+    (asserts! (check-card-not-locked card-id) err-card-locked)
+    (asserts! (>= current-exp required-exp) err-upgrade-requirements)
+   
+    (map-set card-details card-id
+      (merge card
+        {
+          level: (+ current-level u1),
+          experience: (- current-exp required-exp)
+        }
+      )
+    )
+   
+    (map-set card-status card-id
+      (merge status
+        {
+          upgrade-count: (+ (get upgrade-count status) u1),
+          last-action: block-height
+        }
+      )
+    )
+   
+    (ok (+ current-level u1))
+  )
+)
+;; read-only functions
+(define-read-only (get-card-details (card-id uint))
+ (ok (unwrap! (map-get? card-details card-id) err-not-found))
+)
+
+
+(define-read-only (get-card-owner (card-id uint))
+ (ok (unwrap! (map-get? card-ownership card-id) err-not-found))
+)
+
+(define-read-only (get-card-status (card-id uint))
+ (ok (default-to
+   {locked: false, cooldown-until: u0, last-action: u0, upgrade-count: u0}
+   (map-get? card-status card-id)))
+)
+
+(define-read-only (get-user-stats (user principal))
+ (ok (default-to
+   {
+     cards-owned: u0,
+     cards-created: u0,
+     cards-sold: u0,
+     cards-purchased: u0,
+     total-spent: u0,
+     total-earned: u0
+   }
+   (map-get? user-stats user)))
+)
+
+
+(define-read-only (get-last-card-id)
+ (ok (var-get last-card-id))
+)
+)
